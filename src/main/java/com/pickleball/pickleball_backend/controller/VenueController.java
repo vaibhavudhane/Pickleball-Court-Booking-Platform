@@ -3,6 +3,9 @@ package com.pickleball.pickleball_backend.controller;
 import com.pickleball.pickleball_backend.dto.response.VenueCardDTO;
 import com.pickleball.pickleball_backend.dto.response.VenueDetailDTO;
 import com.pickleball.pickleball_backend.service.VenueService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
@@ -15,25 +18,36 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/venues")
 @RequiredArgsConstructor
+@Tag(name = "Venues — Public", description = "Marketplace listing and venue details — no login required")
 public class VenueController {
 
     private final VenueService venueService;
 
-    // Marketplace listing — with optional date/time filter
+    @Operation(
+            summary = "Get all venues — Marketplace",
+            description = "Returns all venues. Optionally filter by date and time slot " +
+                    "to show only venues with available courts."
+    )
     @GetMapping
     public ResponseEntity<List<VenueCardDTO>> getAllVenues(
+            @Parameter(description = "Filter by date (YYYY-MM-DD)", example = "2026-03-25")
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
             LocalDate date,
+            @Parameter(description = "Filter by time slot (HH:MM)", example = "09:00")
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.TIME)
             LocalTime startTime) {
         return ResponseEntity.ok(venueService.getAllVenues(date, startTime));
     }
 
-    // Venue detail page
+    @Operation(
+            summary = "Get venue detail",
+            description = "Returns full venue information including photos, rates, and contact details."
+    )
     @GetMapping("/{id}")
     public ResponseEntity<VenueDetailDTO> getVenueDetail(
+            @Parameter(description = "Venue ID", example = "1")
             @PathVariable Long id) {
         return ResponseEntity.ok(venueService.getVenueDetail(id));
     }

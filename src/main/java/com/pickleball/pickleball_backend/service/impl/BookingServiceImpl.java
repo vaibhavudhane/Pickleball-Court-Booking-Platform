@@ -14,10 +14,11 @@ import com.pickleball.pickleball_backend.exception.UnauthorizedException;
 import com.pickleball.pickleball_backend.repository.*;
 import com.pickleball.pickleball_backend.service.BookingService;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +27,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class BookingServiceImpl implements BookingService {
 
+    private static final Logger log = LoggerFactory.getLogger(BookingServiceImpl.class);
+
     private final CartItemRepository cartRepository;
     private final BookingRepository bookingRepository;
     private final UserRepository userRepository;
@@ -33,9 +36,14 @@ public class BookingServiceImpl implements BookingService {
     @Override
     @Transactional
     public CheckoutResponseDTO checkout(Long userId) {
+        // userId is an internal system ID — safe to log
+        log.info("Checkout initiated — userId: {}", userId);
+
         List<CartItem> cartItems = cartRepository.findByUserId(userId);
+        log.debug("Cart contains {} items — userId: {}", cartItems.size(), userId);
 
         if (cartItems.isEmpty()) {
+            log.warn("Checkout failed — empty cart — userId: {}", userId);
             throw new RuntimeException("Your cart is empty");
         }
 
@@ -50,19 +58,21 @@ public class BookingServiceImpl implements BookingService {
                             BookingStatus.CONFIRMED
                     );
             if (alreadyBooked) {
-                conflicts.add(
-                        item.getCourt().getCourtName() +
-                                " on " + item.getBookingDate() +
-                                " at " + item.getStartTime()
-                );
+                // courtId, date, time are not PII — safe to log
+                String conflict = item.getCourt().getCourtName() +
+                        " on " + item.getBookingDate() +
+                        " at " + item.getStartTime();
+                log.warn("Slot conflict detected — userId: {}, slot: {}", userId, conflict);
+                conflicts.add(conflict);
             }
         }
 
         if (!conflicts.isEmpty()) {
+            log.warn("Checkout rejected — {} conflict(s) — userId: {}",
+                    conflicts.size(), userId);
             throw new CheckoutConflictException(
                     "These slots are no longer available: " +
-                            String.join(", ", conflicts)
-            );
+                            String.join(", ", conflicts));
         }
 
         for (CartItem item : cartItems) {
@@ -77,9 +87,14 @@ public class BookingServiceImpl implements BookingService {
                     .status(BookingStatus.CONFIRMED)
                     .build();
             bookingRepository.save(booking);
+            log.debug("Booking saved — courtId: {}, date: {}, time: {}",
+                    item.getCourt().getId(), item.getBookingDate(), item.getStartTime());
         }
 
         cartRepository.deleteByUserId(userId);
+
+        log.info("Checkout successful — userId: {}, slotsBooked: {}",
+                userId, cartItems.size());
 
         return new CheckoutResponseDTO(
                 "Booking confirmed! " + cartItems.size() + " slot(s) booked.",
@@ -89,8 +104,10 @@ public class BookingServiceImpl implements BookingService {
 
     @Override
     public List<BookingDTO> getMyBookings(Long userId) {
+        log.debug("Fetching booking history — userId: {}", userId);
         List<Booking> bookings = bookingRepository
                 .findByUserIdOrderByBookedAtDesc(userId);
+        log.debug("Found {} bookings — userId: {}", bookings.size(), userId);
         return bookings.stream().map(this::toDTO).toList();
     }
 
@@ -98,30 +115,34 @@ public class BookingServiceImpl implements BookingService {
     @Transactional
     public BookingDTO reschedule(Long userId, Long bookingId,
                                  RescheduleRequest request) {
+        // userId, bookingId, date and time are not PII — safe to log
+        log.info("Reschedule attempt — userId: {}, bookingId: {}, newDate: {}, newTime: {}",
+                userId, bookingId, request.newDate(), request.newStartTime());
 
-        // Step 1: Find the booking
         Booking booking = bookingRepository.findById(bookingId)
-                .orElseThrow(() ->
-                        new ResourceNotFoundException("Booking not found"));
+                .orElseThrow(() -> {
+                    log.warn("Reschedule failed — bookingId not found: {}", bookingId);
+                    return new ResourceNotFoundException("Booking not found");
+                });
 
-        // Step 2: Verify this booking belongs to the logged-in user
         if (!booking.getUser().getId().equals(userId)) {
+            log.warn("Reschedule rejected — unauthorized — userId: {}, bookingId: {}",
+                    userId, bookingId);
             throw new UnauthorizedException(
                     "You cannot reschedule someone else's booking");
         }
 
-        // Step 3: 12-hour rule
-        // Cannot reschedule if booking starts within 12 hours from now
         LocalDateTime originalStart = booking.getBookingDate()
                 .atTime(booking.getStartTime());
         LocalDateTime twelveHoursFromNow = LocalDateTime.now().plusHours(12);
 
         if (twelveHoursFromNow.isAfter(originalStart)) {
+            log.warn("Reschedule rejected — 12-hour rule — userId: {}, bookingId: {}",
+                    userId, bookingId);
             throw new RescheduleNotAllowedException(
                     "Cannot reschedule. Booking starts in less than 12 hours.");
         }
 
-        // Step 4: Check if new slot is available
         boolean newSlotTaken = bookingRepository
                 .existsByCourtIdAndBookingDateAndStartTimeAndStatus(
                         booking.getCourt().getId(),
@@ -131,18 +152,22 @@ public class BookingServiceImpl implements BookingService {
                 );
 
         if (newSlotTaken) {
+            log.warn("Reschedule rejected — new slot taken — courtId: {}, date: {}, time: {}",
+                    booking.getCourt().getId(), request.newDate(), request.newStartTime());
             throw new SlotAlreadyBookedException(
                     "The new slot is already booked. Please choose another time.");
         }
 
-        // Step 5: Atomic swap
-        // Update the booking record — old slot freed, new slot occupied
         booking.setBookingDate(request.newDate());
         booking.setStartTime(request.newStartTime());
         booking.setEndTime(request.newStartTime().plusHours(1));
         booking.setStatus(BookingStatus.RESCHEDULED);
 
         Booking updated = bookingRepository.save(booking);
+
+        log.info("Booking rescheduled — userId: {}, bookingId: {}, newDate: {}, newTime: {}",
+                userId, bookingId, request.newDate(), request.newStartTime());
+
         return toDTO(updated);
     }
 

@@ -32,10 +32,19 @@ public class SecurityConfig {
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)) // No sessions
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/**").permitAll()    // Public: register, login
-                        .requestMatchers("/api/venues").permitAll()     // Public: view venues
-                        .requestMatchers("/api/venues/*/availability").permitAll() // Public: view slots
-                        .anyRequest().authenticated()                  // Everything else needs JWT
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/api/venues").permitAll()
+                        .requestMatchers("/api/venues/**").permitAll()
+                        .requestMatchers(
+                                "/swagger-ui/**",
+                                "/swagger-ui.html",
+                                "/v3/api-docs/**",
+                                "/v3/api-docs",
+                                "/swagger-resources/**",
+                                "/webjars/**",
+                                "/actuator/**"
+                        ).permitAll()
+                        .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();

@@ -7,6 +7,8 @@ import com.pickleball.pickleball_backend.enums.SlotStatus;
 import com.pickleball.pickleball_backend.repository.*;
 import com.pickleball.pickleball_backend.service.AvailabilityService;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -17,17 +19,22 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AvailabilityServiceImpl implements AvailabilityService {
 
+    private static final Logger log = LoggerFactory.getLogger(AvailabilityServiceImpl.class);
+
     private final VenueRepository venueRepository;
     private final BookingRepository bookingRepository;
 
     @Override
     public AvailabilityResponseDTO getAvailability(Long venueId, LocalDate date) {
+        // venueId and date are not PII — safe to log
+        log.debug("Fetching availability — venueId: {}, date: {}", venueId, date);
 
-        // Step 1: Fetch venue — throws exception if not found
         Venue venue = venueRepository.findById(venueId)
-                .orElseThrow(() -> new RuntimeException("Venue not found: " + venueId));
+                .orElseThrow(() -> {
+                    log.warn("Availability request failed — venueId not found: {}", venueId);
+                    return new RuntimeException("Venue not found: " + venueId);
+                });
 
-        // Step 2: Determine price based on day of week
         DayOfWeek dayOfWeek = date.getDayOfWeek();
         boolean isWeekend = (dayOfWeek == DayOfWeek.SATURDAY
                 || dayOfWeek == DayOfWeek.SUNDAY);
@@ -35,16 +42,21 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 ? venue.getWeekendRate()
                 : venue.getWeekdayRate();
 
-        // Step 3: Generate all hourly time slots
+        log.debug("Pricing applied — venueId: {}, isWeekend: {}, price: {}",
+                venueId, isWeekend, pricePerSlot);
+
         List<LocalTime[]> timeSlots = generateHourlySlots(
                 venue.getOpeningTime(), venue.getClosingTime());
 
-        // Step 4: Fetch ALL confirmed bookings for this venue+date
+        log.debug("Generated {} time slots for venueId: {}", timeSlots.size(), venueId);
+
         List<Booking> existingBookings = bookingRepository
                 .findByVenueIdAndBookingDateAndStatus(
                         venueId, date, BookingStatus.CONFIRMED);
 
-        // Step 5: Build the grid
+        log.debug("Found {} confirmed bookings — venueId: {}, date: {}",
+                existingBookings.size(), venueId, date);
+
         List<CourtAvailabilityDTO> courtDTOs = new ArrayList<>();
 
         for (Court court : venue.getCourts()) {
@@ -52,41 +64,28 @@ public class AvailabilityServiceImpl implements AvailabilityService {
 
             for (LocalTime[] slot : timeSlots) {
                 LocalTime slotStart = slot[0];
-                LocalTime slotEnd   = slot[1];
-
+                LocalTime slotEnd = slot[1];
                 SlotStatus status = determineSlotStatus(
                         court, slotStart, existingBookings, date);
-
                 slotDTOs.add(new SlotDTO(
-                        slotStart.toString(),
-                        slotEnd.toString(),
-                        status,
-                        pricePerSlot
-                ));
+                        slotStart.toString(), slotEnd.toString(),
+                        status, pricePerSlot));
             }
 
             courtDTOs.add(new CourtAvailabilityDTO(
-                    court.getId(),
-                    court.getCourtName(),
-                    slotDTOs
-            ));
+                    court.getId(), court.getCourtName(), slotDTOs));
         }
 
-        return new AvailabilityResponseDTO(
-                venueId,
-                venue.getName(),
-                date,
-                courtDTOs
-        );
+        log.info("Availability grid built — venueId: {}, date: {}, courts: {}, slotsEach: {}",
+                venueId, date, courtDTOs.size(), timeSlots.size());
+
+        return new AvailabilityResponseDTO(venueId, venue.getName(), date, courtDTOs);
     }
 
-    // Generate slots: [06:00,07:00], [07:00,08:00], ..., [22:00,23:00]
     private List<LocalTime[]> generateHourlySlots(
             LocalTime openTime, LocalTime closeTime) {
-
         List<LocalTime[]> slots = new ArrayList<>();
         LocalTime current = openTime;
-
         while (current.isBefore(closeTime)) {
             slots.add(new LocalTime[]{ current, current.plusHours(1) });
             current = current.plusHours(1);
@@ -95,18 +94,14 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     private SlotStatus determineSlotStatus(
-            Court court,
-            LocalTime slotStart,
-            List<Booking> existingBookings,
-            LocalDate date) {
+            Court court, LocalTime slotStart,
+            List<Booking> existingBookings, LocalDate date) {
 
-        // Rule 1: Past slots on TODAY are UNAVAILABLE
         if (date.isEqual(LocalDate.now())
                 && slotStart.isBefore(LocalTime.now())) {
             return SlotStatus.UNAVAILABLE;
         }
 
-        // Rule 2: Check if any confirmed booking matches this court+slot
         boolean isBooked = existingBookings.stream().anyMatch(booking ->
                 booking.getCourt().getId().equals(court.getId()) &&
                         booking.getStartTime().equals(slotStart)

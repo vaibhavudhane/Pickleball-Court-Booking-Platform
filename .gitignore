@@ -31,3 +31,18 @@ build/
 
 ### VS Code ###
 .vscode/
+
+
+# Environment variables — never commit sensitive data
+.env
+*.env
+
+# Application properties with real credentials
+src/main/resources/application.properties
+
+# Log files — never commit logs
+logs/
+*.log
+
+# Upload folder — never commit user uploaded files
+uploads/

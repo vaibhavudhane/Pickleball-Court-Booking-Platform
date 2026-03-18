@@ -15,4 +15,5 @@ public interface VenueService {
     VenueDetailDTO getVenueDetail(Long venueId);
     List<VenueCardDTO> getAllVenues(LocalDate date, LocalTime startTime);
     List<BookingDTO> getVenueBookings(Long ownerId, Long venueId, LocalDate date);
+    List<VenueDetailDTO> getMyVenues(Long ownerId);
 }
