@@ -16,5 +16,6 @@ public record VenueDetailDTO(
         BigDecimal weekendRate,
         String contactPhone,
         String contactEmail,
-        List<String> photoUrls
+        List<String> photoUrls,
+        List<Long> photoIds
 ) {}

@@ -8,13 +8,16 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/cart")
 @RequiredArgsConstructor
+@Validated
 @Tag(name = "Cart", description = "Cart management — add, view, remove slots")
 @SecurityRequirement(name = "Bearer Authentication")
 public class CartController {
@@ -25,7 +28,9 @@ public class CartController {
     @Operation(
             summary = "Add slots to cart",
             description = "Add one or more court slots to cart. " +
-                    "Validates slot availability before adding."
+                    "Validates slot availability before adding. " +
+                    "Supports flexible durations — e.g. 09:00 to 10:30 (1.5 hrs). " +
+                    "Minimum booking duration is 1 hour."
     )
     @PostMapping("/add")
     public ResponseEntity<Void> addToCart(
@@ -51,6 +56,7 @@ public class CartController {
     )
     @DeleteMapping("/{itemId}")
     public ResponseEntity<Void> removeItem(
+            @Min(value = 1, message = "Cart item ID must be a positive number")
             @PathVariable Long itemId) {
         Long userId = securityUtils.getCurrentUserId();
         cartService.removeItem(userId, itemId);

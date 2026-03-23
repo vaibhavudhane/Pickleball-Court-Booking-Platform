@@ -1,6 +1,10 @@
 package com.pickleball.pickleball_backend.exception;
 
+
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import com.pickleball.pickleball_backend.dto.response.ErrorResponse;
+import jakarta.validation.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -29,6 +33,27 @@ public class GlobalExceptionHandler {
         });
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errors);
     }
+
+
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ErrorResponse> handleConstraintViolation(
+            ConstraintViolationException ex) {
+        String message = ex.getConstraintViolations()
+                .stream()
+                .map(v -> v.getMessage())
+                .findFirst()
+                .orElse("Validation failed");
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse(message, 400));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalArgument(
+            IllegalArgumentException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse(ex.getMessage(), 400));
+    }
+
 
     @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorResponse> handleInvalidJson(
@@ -91,6 +116,35 @@ public class GlobalExceptionHandler {
             UnauthorizedException e) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .body(new ErrorResponse(e.getMessage(), 403));
+    }
+
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(
+            MethodArgumentTypeMismatchException ex) {
+
+        String message;
+
+        if (ex.getRequiredType() != null &&
+                ex.getRequiredType().equals(java.time.LocalDate.class)) {
+            message = "Invalid date format — use YYYY-MM-DD, example: 2026-03-25";
+        } else if (ex.getRequiredType() != null &&
+                ex.getRequiredType().equals(Long.class)) {
+            message = "Invalid ID format — must be a number";
+        } else {
+            message = "Invalid value for parameter '" + ex.getName() + "'";
+        }
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse(message, 400));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ErrorResponse> handleAccessDenied(
+            AccessDeniedException e) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(new ErrorResponse(
+                        "Access denied — you do not have permission to perform this action", 403));
     }
 
     @ExceptionHandler(RuntimeException.class)

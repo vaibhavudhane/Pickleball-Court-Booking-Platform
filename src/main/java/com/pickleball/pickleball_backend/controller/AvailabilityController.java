@@ -5,15 +5,18 @@ import com.pickleball.pickleball_backend.service.AvailabilityService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
 
 @RestController
 @RequiredArgsConstructor
+@Validated
 @Tag(name = "Availability", description = "Court availability grid endpoint")
 public class AvailabilityController {
 
@@ -27,10 +30,11 @@ public class AvailabilityController {
     @GetMapping("/api/venues/{venueId}/availability")
     public ResponseEntity<AvailabilityResponseDTO> getAvailability(
             @Parameter(description = "Venue ID", example = "1")
-            @PathVariable Long venueId,
+            @PathVariable
+            @Min(value = 1, message = "Venue ID must be a positive number")  // ← blocks 0 and negatives
+            Long venueId,
             @Parameter(description = "Date in YYYY-MM-DD format", example = "2026-03-25")
-            @RequestParam
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
             LocalDate date) {
         return ResponseEntity.ok(
                 availabilityService.getAvailability(venueId, date));
