@@ -1,0 +1,55 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [ "dev", "feature/**" ]
+  pull_request:
+    branches: [ "dev", "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Create application.properties for CI
+        run: |
+          mkdir -p src/main/resources
+          cat > src/main/resources/application.properties << EOF
+          spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+          spring.datasource.driver-class-name=org.h2.Driver
+          spring.datasource.username=sa
+          spring.datasource.password=
+          spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+          spring.jpa.hibernate.ddl-auto=create-drop
+          spring.jpa.open-in-view=false
+          jwt.secret=pickleball_ci_secret_key_minimum_32_chars_long
+          jwt.expiration=86400000
+          spring.servlet.multipart.max-file-size=10MB
+          spring.servlet.multipart.max-request-size=50MB
+          EOF
+
+      - name: Build with Maven
+        run: mvn clean compile -q
+
+      - name: Run tests
+        run: mvn test -q
+
+      - name: Package JAR
+        run: mvn package -DskipTests -q
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pickleball-backend-jar
+          path: target/*.jar
+          retention-days: 5
