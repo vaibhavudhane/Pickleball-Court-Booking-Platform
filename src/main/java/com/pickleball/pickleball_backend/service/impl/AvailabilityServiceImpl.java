@@ -19,15 +19,21 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AvailabilityServiceImpl implements AvailabilityService {
 
-    private static final Logger log = LoggerFactory.getLogger(AvailabilityServiceImpl.class);
+    private static final Logger log =
+            LoggerFactory.getLogger(AvailabilityServiceImpl.class);
 
     private final VenueRepository venueRepository;
     private final BookingRepository bookingRepository;
 
     @Override
     public AvailabilityResponseDTO getAvailability(Long venueId, LocalDate date) {
-        // venueId and date are not PII — safe to log
         log.debug("Fetching availability — venueId: {}, date: {}", venueId, date);
+
+        if (date.isBefore(LocalDate.now())) {
+            log.warn("Availability request rejected — past date: {}", date);
+            throw new IllegalArgumentException(
+                    "Date must not be in the past — received: " + date);
+        }
 
         Venue venue = venueRepository.findById(venueId)
                 .orElseThrow(() -> {
@@ -38,21 +44,14 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         DayOfWeek dayOfWeek = date.getDayOfWeek();
         boolean isWeekend = (dayOfWeek == DayOfWeek.SATURDAY
                 || dayOfWeek == DayOfWeek.SUNDAY);
-        BigDecimal pricePerSlot = isWeekend
+        BigDecimal pricePerHour = isWeekend
                 ? venue.getWeekendRate()
                 : venue.getWeekdayRate();
 
-        log.debug("Pricing applied — venueId: {}, isWeekend: {}, price: {}",
-                venueId, isWeekend, pricePerSlot);
-
-        List<LocalTime[]> timeSlots = generateHourlySlots(
-                venue.getOpeningTime(), venue.getClosingTime());
-
-        log.debug("Generated {} time slots for venueId: {}", timeSlots.size(), venueId);
-
         List<Booking> existingBookings = bookingRepository
-                .findByVenueIdAndBookingDateAndStatus(
-                        venueId, date, BookingStatus.CONFIRMED);
+                .findByVenueIdAndBookingDateAndStatusIn(
+                        venueId, date,
+                        List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED));
 
         log.debug("Found {} confirmed bookings — venueId: {}, date: {}",
                 existingBookings.size(), venueId, date);
@@ -60,53 +59,159 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         List<CourtAvailabilityDTO> courtDTOs = new ArrayList<>();
 
         for (Court court : venue.getCourts()) {
-            List<SlotDTO> slotDTOs = new ArrayList<>();
+            List<Booking> courtBookings = existingBookings.stream()
+                    .filter(b -> b.getCourt().getId().equals(court.getId()))
+                    .toList();
 
-            for (LocalTime[] slot : timeSlots) {
-                LocalTime slotStart = slot[0];
-                LocalTime slotEnd = slot[1];
-                SlotStatus status = determineSlotStatus(
-                        court, slotStart, existingBookings, date);
-                slotDTOs.add(new SlotDTO(
-                        slotStart.toString(), slotEnd.toString(),
-                        status, pricePerSlot));
-            }
+            List<SlotDTO> slotDTOs = generateDynamicSlots(
+                    venue.getOpeningTime(),
+                    venue.getClosingTime(),
+                    courtBookings,
+                    date,
+                    pricePerHour
+            );
 
             courtDTOs.add(new CourtAvailabilityDTO(
                     court.getId(), court.getCourtName(), slotDTOs));
         }
 
-        log.info("Availability grid built — venueId: {}, date: {}, courts: {}, slotsEach: {}",
-                venueId, date, courtDTOs.size(), timeSlots.size());
+        log.info("Availability grid built — venueId: {}, date: {}, courts: {}",
+                venueId, date, courtDTOs.size());
 
-        return new AvailabilityResponseDTO(venueId, venue.getName(), date, courtDTOs);
+        return new AvailabilityResponseDTO(
+                venueId, venue.getName(), date, courtDTOs);
     }
 
-    private List<LocalTime[]> generateHourlySlots(
-            LocalTime openTime, LocalTime closeTime) {
-        List<LocalTime[]> slots = new ArrayList<>();
-        LocalTime current = openTime;
-        while (current.isBefore(closeTime)) {
-            slots.add(new LocalTime[]{ current, current.plusHours(1) });
-            current = current.plusHours(1);
+    private List<SlotDTO> generateDynamicSlots(
+            LocalTime openTime,
+            LocalTime closeTime,
+            List<Booking> courtBookings,
+            LocalDate date,
+            BigDecimal pricePerHour) {
+
+        List<SlotDTO> slots = new ArrayList<>();
+
+        TreeSet<LocalTime> boundaries = new TreeSet<>();
+        boundaries.add(openTime);
+        boundaries.add(closeTime);
+
+        for (Booking booking : courtBookings) {
+            if (booking.getStartTime().isBefore(closeTime) &&
+                    booking.getEndTime().isAfter(openTime)) {
+                boundaries.add(booking.getStartTime());
+                boundaries.add(booking.getEndTime());
+            }
         }
+
+        List<LocalTime> points = new ArrayList<>(boundaries);
+
+        for (int i = 0; i < points.size() - 1; i++) {
+            LocalTime segmentStart = points.get(i);
+            LocalTime segmentEnd = points.get(i + 1);
+
+            if (segmentStart.isBefore(openTime) || segmentEnd.isAfter(closeTime)) continue;
+
+            boolean isBooked = isOverlappingBooking(segmentStart, segmentEnd, courtBookings);
+
+            if (isBooked) {
+                // ← FIXED: Past booked slots show as UNAVAILABLE not BOOKED
+                boolean isPast = date.isEqual(LocalDate.now()) &&
+                        segmentEnd.isBefore(LocalTime.now());
+                SlotStatus status = isPast ? SlotStatus.UNAVAILABLE : SlotStatus.BOOKED;
+                slots.add(new SlotDTO(
+                        segmentStart.toString(),
+                        segmentEnd.toString(),
+                        status,
+                        calculatePrice(pricePerHour, segmentStart, segmentEnd)));
+            } else {
+                slots.addAll(generateFreeSlots(segmentStart, segmentEnd, date, pricePerHour));
+            }
+        }
+
         return slots;
     }
 
-    private SlotStatus determineSlotStatus(
-            Court court, LocalTime slotStart,
-            List<Booking> existingBookings, LocalDate date) {
+    /**
+     * Splits a free segment into 1-hour slots.
+     *
+     * Key fix: Instead of SKIPPING small leftover slots (< 15 min),
+     * we now show them as UNAVAILABLE so every court has the same
+     * time rows and the grid stays aligned.
+     *
+     * A slot is bookable if it is >= 30 minutes (new minimum).
+     * A slot under 30 minutes shows as UNAVAILABLE (unclickable gap).
+     */
+    private List<SlotDTO> generateFreeSlots(
+            LocalTime segmentStart,
+            LocalTime segmentEnd,
+            LocalDate date,
+            BigDecimal pricePerHour) {
 
-        if (date.isEqual(LocalDate.now())
-                && slotStart.isBefore(LocalTime.now())) {
-            return SlotStatus.UNAVAILABLE;
+        List<SlotDTO> slots = new ArrayList<>();
+        LocalTime current = segmentStart;
+
+        while (current.isBefore(segmentEnd)) {
+            LocalTime next = current.plusHours(1);
+
+            // Clamp to segment end
+            if (next.isAfter(segmentEnd)) {
+                next = segmentEnd;
+            }
+
+            long minutes = Duration.between(current, next).toMinutes();
+
+            if (minutes > 0) {
+                SlotStatus status;
+
+                if (minutes < 30) {
+                    // ← FIXED: Small gap (< 30 min) — show as UNAVAILABLE
+                    // so the grid row exists and courts stay aligned.
+                    // Previously these were SKIPPED causing grid misalignment.
+                    status = SlotStatus.UNAVAILABLE;
+                } else {
+                    // Normal slot — check if it's in the past for today
+                    status = determineStatus(current, date);
+                }
+
+                slots.add(new SlotDTO(
+                        current.toString(),
+                        next.toString(),
+                        status,
+                        calculatePrice(pricePerHour, current, next)));
+            }
+
+            current = next;
+            if (current.equals(segmentEnd)) break;
         }
 
-        boolean isBooked = existingBookings.stream().anyMatch(booking ->
-                booking.getCourt().getId().equals(court.getId()) &&
-                        booking.getStartTime().equals(slotStart)
-        );
+        return slots;
+    }
 
-        return isBooked ? SlotStatus.BOOKED : SlotStatus.AVAILABLE;
+    private BigDecimal calculatePrice(
+            BigDecimal pricePerHour,
+            LocalTime start,
+            LocalTime end) {
+        long minutes = Duration.between(start, end).toMinutes();
+        return pricePerHour
+                .multiply(BigDecimal.valueOf(minutes))
+                .divide(BigDecimal.valueOf(60), 2,
+                        java.math.RoundingMode.HALF_UP);
+    }
+
+    private boolean isOverlappingBooking(
+            LocalTime segmentStart,
+            LocalTime segmentEnd,
+            List<Booking> bookings) {
+        return bookings.stream().anyMatch(b ->
+                b.getStartTime().isBefore(segmentEnd) &&
+                        b.getEndTime().isAfter(segmentStart));
+    }
+
+    private SlotStatus determineStatus(LocalTime slotStart, LocalDate date) {
+        if (date.isEqual(LocalDate.now()) &&
+                slotStart.isBefore(LocalTime.now())) {
+            return SlotStatus.UNAVAILABLE;
+        }
+        return SlotStatus.AVAILABLE;
     }
 }

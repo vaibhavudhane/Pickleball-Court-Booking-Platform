@@ -17,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.DayOfWeek;
 import java.util.List;
 
@@ -35,48 +37,52 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public void addToCart(Long userId, AddToCartRequest request) {
-        // userId and item count are not PII — safe to log
         log.info("Add to cart — userId: {}, itemCount: {}",
                 userId, request.items().size());
 
         for (CartItemRequest item : request.items()) {
 
-            if (item.date().isBefore(java.time.LocalDate.now())) {
-                log.warn("Cart rejected — past date — userId: {}, date: {}",
-                        userId, item.date());
-                throw new RuntimeException(
-                        "Cannot book a slot in the past. Please select a future date.");
-            }
-
+            // 1. Date range check
             if (item.date().isAfter(java.time.LocalDate.now().plusDays(90))) {
                 log.warn("Cart rejected — date beyond 90 days — userId: {}", userId);
+                throw new RuntimeException("Cannot book more than 90 days in advance.");
+            }
+
+            // 2. End time must be after start time
+            if (!item.endTime().isAfter(item.startTime())) {
+                log.warn("Cart rejected — endTime not after startTime — userId: {}", userId);
+                throw new RuntimeException("End time must be after start time");
+            }
+
+            // 3. Minimum 30 minutes duration
+            long durationMinutes = Duration.between(
+                    item.startTime(), item.endTime()).toMinutes();
+            if (durationMinutes < 30) {
+                log.warn("Cart rejected — duration under 30 mins — userId: {}, duration: {}",
+                        userId, durationMinutes);
                 throw new RuntimeException(
-                        "Cannot book more than 90 days in advance.");
+                        "Minimum booking duration is 30 minutes — " +
+                                "your slot is only " + durationMinutes + " minutes");
             }
 
-            if (item.startTime().getMinute() != 0
-                    || item.startTime().getSecond() != 0) {
-                log.warn("Cart rejected — non-hour time — userId: {}, time: {}",
-                        userId, item.startTime());
+            // 4. Check overlaps within the same incoming request
+            boolean overlapsIncomingRequest = request.items().stream()
+                    .filter(other -> other != item)
+                    .anyMatch(other ->
+                            other.courtId().equals(item.courtId()) &&
+                                    other.date().equals(item.date()) &&
+                                    other.startTime().isBefore(item.endTime()) &&
+                                    other.endTime().isAfter(item.startTime()));
+
+            if (overlapsIncomingRequest) {
+                log.warn("Cart rejected — items in same request overlap — userId: {}, courtId: {}",
+                        userId, item.courtId());
                 throw new RuntimeException(
-                        "Booking time must be on the hour — e.g. 09:00, 10:00, not 09:30");
+                        "Slot " + item.startTime() + " to " + item.endTime() +
+                                " on " + item.date() + " overlaps another slot in the same request");
             }
 
-            if (item.startTime().getHour() < 0
-                    || item.startTime().getHour() > 22) {
-                log.warn("Cart rejected — time out of range — userId: {}, time: {}",
-                        userId, item.startTime());
-                throw new RuntimeException(
-                        "Invalid booking time. Time must be between 00:00 and 22:00");
-            }
-
-            if (item.courtId() <= 0) {
-                throw new RuntimeException("Invalid Court ID");
-            }
-            if (item.venueId() <= 0) {
-                throw new RuntimeException("Invalid Venue ID");
-            }
-
+            // 5. Fetch court and validate it belongs to the venue
             Court court = courtRepository.findById(item.courtId())
                     .orElseThrow(() -> new RuntimeException(
                             "Court not found with ID: " + item.courtId()));
@@ -89,64 +95,97 @@ public class CartServiceImpl implements CartService {
                                 " does not belong to venue " + item.venueId());
             }
 
-            Venue venueCheck = venueRepository.findById(item.venueId())
+            // 6. Fetch venue
+            Venue venue = venueRepository.findById(item.venueId())
                     .orElseThrow(() -> new RuntimeException("Venue not found"));
 
-            if (item.startTime().isBefore(venueCheck.getOpeningTime()) ||
-                    item.startTime().isAfter(
-                            venueCheck.getClosingTime().minusHours(1))) {
-                log.warn("Cart rejected — outside operating hours — venueId: {}, time: {}",
+            // 7. Start time within operating hours
+            // ← FIXED: Changed minusMinutes(60) to minusMinutes(30)
+            // This allows booking start times up to 30 mins before closing
+            // (minimum 30-min booking), instead of wrongly requiring 60 mins gap
+            if (item.startTime().isBefore(venue.getOpeningTime()) ||
+                    item.startTime().isAfter(venue.getClosingTime().minusMinutes(30))) {
+                log.warn("Cart rejected — startTime outside operating hours — venueId: {}, time: {}",
                         item.venueId(), item.startTime());
                 throw new RuntimeException(
-                        "Slot time " + item.startTime() +
+                        "Start time " + item.startTime() +
                                 " is outside venue operating hours (" +
-                                venueCheck.getOpeningTime() + " - " +
-                                venueCheck.getClosingTime() + ")");
+                                venue.getOpeningTime() + " - " + venue.getClosingTime() + ")");
             }
 
-            if (bookingRepository
-                    .existsByCourtIdAndBookingDateAndStartTimeAndStatus(
-                            item.courtId(), item.date(),
-                            item.startTime(), BookingStatus.CONFIRMED)) {
-                log.warn("Cart rejected — slot already booked — courtId: {}, date: {}, time: {}",
-                        item.courtId(), item.date(), item.startTime());
+            // 8. End time must not exceed venue closing time
+            if (item.endTime().isAfter(venue.getClosingTime())) {
+                log.warn("Cart rejected — endTime exceeds closing — venueId: {}, endTime: {}",
+                        item.venueId(), item.endTime());
                 throw new RuntimeException(
-                        "Slot already booked: " + item.startTime() +
-                                " on " + item.date());
+                        "End time " + item.endTime() +
+                                " exceeds venue closing time " + venue.getClosingTime());
             }
 
-            if (cartRepository
-                    .existsByUserIdAndCourtIdAndBookingDateAndStartTime(
-                            userId, item.courtId(),
-                            item.date(), item.startTime())) {
+            // 9. Check overlap against confirmed/rescheduled bookings in DB
+            if (bookingRepository.existsOverlappingBooking(
+                    item.courtId(), item.date(),
+                    item.startTime(), item.endTime(),
+                    List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED))) {
+                log.warn("Cart rejected — slot overlaps existing booking — courtId: {}, date: {}, time: {} to {}",
+                        item.courtId(), item.date(), item.startTime(), item.endTime());
+                throw new RuntimeException(
+                        "Slot " + item.startTime() + " to " + item.endTime() +
+                                " on " + item.date() + " overlaps an existing booking");
+            }
+
+            // 10. Check overlap against items already in this user's cart in DB
+            List<CartItem> existingCartItems = cartRepository.findByUserId(userId);
+            boolean overlapsCart = existingCartItems.stream()
+                    .anyMatch(cartItem ->
+                            cartItem.getCourt().getId().equals(item.courtId()) &&
+                                    cartItem.getBookingDate().equals(item.date()) &&
+                                    cartItem.getStartTime().isBefore(item.endTime()) &&
+                                    cartItem.getEndTime().isAfter(item.startTime()));
+
+            if (overlapsCart) {
+                log.warn("Cart rejected — overlaps item in cart — userId: {}, courtId: {}, time: {} to {}",
+                        userId, item.courtId(), item.startTime(), item.endTime());
+                throw new RuntimeException(
+                        "Slot " + item.startTime() + " to " + item.endTime() +
+                                " on " + item.date() + " overlaps another slot already in your cart");
+            }
+
+            // 11. Exact duplicate check
+            if (cartRepository.existsByUserIdAndCourtIdAndBookingDateAndStartTime(
+                    userId, item.courtId(), item.date(), item.startTime())) {
                 log.warn("Cart rejected — slot already in cart — userId: {}, courtId: {}",
                         userId, item.courtId());
                 throw new RuntimeException("Slot already in your cart");
             }
 
-            Venue venue = venueRepository.findById(item.venueId())
-                    .orElseThrow(() -> new RuntimeException("Venue not found"));
-
+            // 12. Calculate price — multiply first, divide last, round only at end
             DayOfWeek day = item.date().getDayOfWeek();
-            boolean isWeekend = (day == DayOfWeek.SATURDAY
-                    || day == DayOfWeek.SUNDAY);
-            BigDecimal price = isWeekend
+            boolean isWeekend = (day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY);
+            BigDecimal hourlyRate = isWeekend
                     ? venue.getWeekendRate()
                     : venue.getWeekdayRate();
 
+            BigDecimal price = hourlyRate
+                    .multiply(BigDecimal.valueOf(durationMinutes))
+                    .divide(BigDecimal.valueOf(60), 2, RoundingMode.HALF_UP);
+
+            // 13. Save cart item
             CartItem cartItem = CartItem.builder()
                     .user(userRepository.getReferenceById(userId))
                     .court(courtRepository.getReferenceById(item.courtId()))
                     .venue(venue)
                     .bookingDate(item.date())
                     .startTime(item.startTime())
-                    .endTime(item.startTime().plusHours(1))
+                    .endTime(item.endTime())
                     .price(price)
                     .build();
 
             cartRepository.save(cartItem);
-            log.debug("Cart item saved — userId: {}, courtId: {}, date: {}, time: {}",
-                    userId, item.courtId(), item.date(), item.startTime());
+            log.debug("Cart item saved — userId: {}, courtId: {}, date: {}, " +
+                            "startTime: {}, endTime: {}, durationMins: {}, price: {}",
+                    userId, item.courtId(), item.date(),
+                    item.startTime(), item.endTime(), durationMinutes, price);
         }
 
         log.info("Cart updated — userId: {}, itemsAdded: {}",
@@ -203,6 +242,11 @@ public class CartServiceImpl implements CartService {
     @Override
     public void clearCart(Long userId) {
         log.info("Clearing cart — userId: {}", userId);
+        List<CartItem> items = cartRepository.findByUserId(userId);
+        if (items.isEmpty()) {
+            log.warn("Clear cart called on empty cart — userId: {}", userId);
+            throw new RuntimeException("Your cart is already empty");
+        }
         cartRepository.deleteByUserId(userId);
         log.info("Cart cleared — userId: {}", userId);
     }

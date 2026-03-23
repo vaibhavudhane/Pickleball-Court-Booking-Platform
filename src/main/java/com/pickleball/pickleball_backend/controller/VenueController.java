@@ -10,6 +10,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import jakarta.validation.constraints.Min;
+import org.springframework.validation.annotation.Validated;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -18,6 +20,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/venues")
 @RequiredArgsConstructor
+@Validated
 @Tag(name = "Venues — Public", description = "Marketplace listing and venue details — no login required")
 public class VenueController {
 
@@ -34,7 +37,10 @@ public class VenueController {
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
             LocalDate date,
-            @Parameter(description = "Filter by time slot (HH:MM)", example = "09:00")
+            @Parameter(description = "Filter by time slot (HH:MM)", example = "09:00",  schema = @io.swagger.v3.oas.annotations.media.Schema(
+                    type = "string",
+                    pattern = "^([01]\\d|2[0-3]):[0-5]\\d$"  // ← tells Swagger it's HH:mm string, not datetime
+            ))
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.TIME)
             LocalTime startTime) {
@@ -45,10 +51,13 @@ public class VenueController {
             summary = "Get venue detail",
             description = "Returns full venue information including photos, rates, and contact details."
     )
+
     @GetMapping("/{id}")
     public ResponseEntity<VenueDetailDTO> getVenueDetail(
             @Parameter(description = "Venue ID", example = "1")
-            @PathVariable Long id) {
+            @PathVariable
+            @Min(value = 1, message = "Venue ID must be a positive number")
+            Long id){
         return ResponseEntity.ok(venueService.getVenueDetail(id));
     }
 }

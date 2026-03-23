@@ -36,10 +36,10 @@ public class Venue {
     private LocalDateTime createdAt = LocalDateTime.now();
 
     @Builder.Default
-    @OneToMany(mappedBy = "venue", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    @OneToMany(mappedBy = "venue", cascade = CascadeType.ALL, fetch = FetchType.EAGER)
     private List<Court> courts = new ArrayList<>();
 
     @Builder.Default
-    @OneToMany(mappedBy = "venue", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    @OneToMany(mappedBy = "venue", cascade = CascadeType.ALL, fetch = FetchType.EAGER)
     private List<VenuePhoto> photos = new ArrayList<>();
 }
