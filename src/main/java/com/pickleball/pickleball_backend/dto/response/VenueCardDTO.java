@@ -6,7 +6,8 @@ public record VenueCardDTO(
         Long id,
         String name,
         String address,
-        Integer numCourts,
+        Integer totalCourts,
+        Integer availableCourts,    // ← how many courts have at least one free slot
         BigDecimal startingRate,
         String thumbnailUrl
 ) {}

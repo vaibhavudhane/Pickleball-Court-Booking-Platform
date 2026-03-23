@@ -18,7 +18,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeSet;
 
 @Service
 @RequiredArgsConstructor
@@ -34,8 +36,6 @@ public class VenueServiceImpl implements VenueService {
 
     @Override
     public VenueDetailDTO createVenue(Long ownerId, CreateVenueRequest request) {
-        // ownerId is internal system ID — safe to log
-        // venue name is business data — safe to log
         log.info("Create venue request — ownerId: {}", ownerId);
 
         User owner = userRepository.findById(ownerId)
@@ -132,6 +132,26 @@ public class VenueServiceImpl implements VenueService {
         venue.setContactPhone(request.contactPhone());
         venue.setContactEmail(request.contactEmail());
 
+        int currentCourts = venue.getCourts().size();
+        int requestedCourts = request.numCourts();
+
+        if (requestedCourts > currentCourts) {
+            for (int i = currentCourts + 1; i <= requestedCourts; i++) {
+                Court court = Court.builder()
+                        .venue(venue)
+                        .courtName("Court " + i)
+                        .courtNumber(i)
+                        .build();
+                courtRepository.save(court);
+                log.debug("Court added during update — venueId: {}, courtNumber: {}", venueId, i);
+            }
+            venue.setNumCourts(requestedCourts);
+        } else if (requestedCourts < currentCourts) {
+            venue.setNumCourts(requestedCourts);
+            log.info("numCourts reduced — venueId: {}, from: {}, to: {}",
+                    venueId, currentCourts, requestedCourts);
+        }
+
         log.info("Venue updated — venueId: {}, ownerId: {}", venueId, ownerId);
         return toDetailDTO(venueRepository.save(venue));
     }
@@ -162,20 +182,29 @@ public class VenueServiceImpl implements VenueService {
     @Override
     public List<VenueCardDTO> getAllVenues(LocalDate date, LocalTime startTime) {
         log.debug("Marketplace request — date: {}, startTime: {}", date, startTime);
-        List<Venue> allVenues = venueRepository.findAll();
 
-        if (date == null || startTime == null) {
-            log.debug("Returning all {} venues — no filter applied", allVenues.size());
-            return allVenues.stream().map(this::toCardDTO).toList();
+        List<Venue> allVenues = venueRepository.findAll();
+        LocalDate queryDate = (date != null) ? date : LocalDate.now();
+
+        if (startTime == null) {
+            // ← FIXED: Remove filter — always return ALL venues
+            // Just calculate availableCourts correctly for display
+            List<VenueCardDTO> result = allVenues.stream()
+                    .map(v -> toCardDTO(v, queryDate))
+                    .toList();
+
+            log.debug("Returning {} venues — date: {}", result.size(), queryDate);
+            return result;
         }
 
+        // Time filter — only return venues where that specific time is bookable
         List<VenueCardDTO> filtered = allVenues.stream()
-                .filter(v -> hasAvailableSlot(v, date, startTime))
-                .map(this::toCardDTO)
+                .filter(v -> hasAvailableSlot(v, queryDate, startTime))
+                .map(v -> toCardDTO(v, queryDate))
                 .toList();
 
         log.info("Marketplace filter — date: {}, time: {}, total: {}, available: {}",
-                date, startTime, allVenues.size(), filtered.size());
+                queryDate, startTime, allVenues.size(), filtered.size());
         return filtered;
     }
 
@@ -222,23 +251,97 @@ public class VenueServiceImpl implements VenueService {
         )).toList();
     }
 
-    private boolean hasAvailableSlot(Venue v, LocalDate date,
-                                     LocalTime startTime) {
+    private int countAvailableCourts(Venue venue, LocalDate date) {
+        int available = 0;
+
+        List<Booking> venueBookings = bookingRepository
+                .findByVenueIdAndBookingDateAndStatusIn(
+                        venue.getId(), date,
+                        List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED));
+
+        for (Court court : venue.getCourts()) {
+
+            List<Booking> courtBookings = venueBookings.stream()
+                    .filter(b -> b.getCourt().getId().equals(court.getId()))
+                    .toList();
+
+            TreeSet<LocalTime> boundaries = new TreeSet<>();
+            boundaries.add(venue.getOpeningTime());
+            boundaries.add(venue.getClosingTime());
+            for (Booking b : courtBookings) {
+                if (b.getStartTime().isBefore(venue.getClosingTime()) &&
+                        b.getEndTime().isAfter(venue.getOpeningTime())) {
+                    boundaries.add(b.getStartTime());
+                    boundaries.add(b.getEndTime());
+                }
+            }
+
+            List<LocalTime> points = new ArrayList<>(boundaries);
+            boolean courtHasFreeSlot = false;
+
+            for (int i = 0; i < points.size() - 1; i++) {
+                LocalTime segStart = points.get(i);
+                LocalTime segEnd = points.get(i + 1);
+
+                if (segStart.isBefore(venue.getOpeningTime()) ||
+                        segEnd.isAfter(venue.getClosingTime())) continue;
+
+                boolean isBooked = courtBookings.stream().anyMatch(b ->
+                        b.getStartTime().isBefore(segEnd) &&
+                                b.getEndTime().isAfter(segStart));
+
+                if (!isBooked) {
+                    boolean isPast = date.isEqual(LocalDate.now()) &&
+                            segStart.isBefore(LocalTime.now());
+                    if (!isPast) {
+                        courtHasFreeSlot = true;
+                        break;
+                    }
+                }
+            }
+
+            if (courtHasFreeSlot) available++;
+        }
+
+        log.debug("Available courts — venueId: {}, date: {}, available: {}",
+                venue.getId(), date, available);
+        return available;
+    }
+
+    private boolean hasAvailableSlot(Venue v, LocalDate date, LocalTime startTime) {
+        LocalTime endTime = startTime.plusHours(1);
+
+        List<Booking> venueBookings = bookingRepository
+                .findByVenueIdAndBookingDateAndStatusIn(
+                        v.getId(), date,
+                        List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED));
+
         for (Court court : v.getCourts()) {
-            boolean booked = bookingRepository
-                    .existsByCourtIdAndBookingDateAndStartTimeAndStatus(
-                            court.getId(), date, startTime, BookingStatus.CONFIRMED);
-            if (!booked) return true;
+            List<Booking> courtBookings = venueBookings.stream()
+                    .filter(b -> b.getCourt().getId().equals(court.getId()))
+                    .toList();
+
+            boolean isBooked = courtBookings.stream().anyMatch(b ->
+                    b.getStartTime().isBefore(endTime) &&
+                            b.getEndTime().isAfter(startTime));
+
+            if (!isBooked) return true;
         }
         return false;
     }
 
-    private VenueCardDTO toCardDTO(Venue v) {
+    private VenueCardDTO toCardDTO(Venue v, LocalDate date) {
         String thumbnail = v.getPhotos().isEmpty() ? null
                 : v.getPhotos().get(0).getPhotoUrl();
+        int availableCourts = countAvailableCourts(v, date);
         return new VenueCardDTO(
-                v.getId(), v.getName(), v.getAddress(),
-                v.getNumCourts(), v.getWeekdayRate(), thumbnail
+                v.getId(),
+                v.getName(),
+                v.getAddress(),
+                v.getNumCourts(),
+                availableCourts,
+                v.getWeekdayRate(),
+                thumbnail
         );
     }
 
@@ -246,13 +349,17 @@ public class VenueServiceImpl implements VenueService {
         List<String> photoUrls = v.getPhotos().stream()
                 .map(VenuePhoto::getPhotoUrl)
                 .toList();
+        List<Long> photoIds = v.getPhotos().stream()
+                .map(VenuePhoto::getId)
+                .toList();
         return new VenueDetailDTO(
                 v.getId(), v.getName(), v.getAddress(),
                 v.getDescription(), v.getNumCourts(),
                 v.getOpeningTime(), v.getClosingTime(),
                 v.getWeekdayRate(), v.getWeekendRate(),
                 v.getContactPhone(), v.getContactEmail(),
-                photoUrls
+                photoUrls,
+                photoIds
         );
     }
 }

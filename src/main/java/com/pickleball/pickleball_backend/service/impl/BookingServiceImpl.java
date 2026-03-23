@@ -5,6 +5,7 @@ import com.pickleball.pickleball_backend.dto.response.BookingDTO;
 import com.pickleball.pickleball_backend.dto.response.CheckoutResponseDTO;
 import com.pickleball.pickleball_backend.entity.Booking;
 import com.pickleball.pickleball_backend.entity.CartItem;
+import com.pickleball.pickleball_backend.entity.Venue;
 import com.pickleball.pickleball_backend.enums.BookingStatus;
 import com.pickleball.pickleball_backend.exception.CheckoutConflictException;
 import com.pickleball.pickleball_backend.exception.RescheduleNotAllowedException;
@@ -19,7 +20,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,7 +39,6 @@ public class BookingServiceImpl implements BookingService {
     @Override
     @Transactional
     public CheckoutResponseDTO checkout(Long userId) {
-        // userId is an internal system ID — safe to log
         log.info("Checkout initiated — userId: {}", userId);
 
         List<CartItem> cartItems = cartRepository.findByUserId(userId);
@@ -50,18 +52,18 @@ public class BookingServiceImpl implements BookingService {
         List<String> conflicts = new ArrayList<>();
 
         for (CartItem item : cartItems) {
-            boolean alreadyBooked = bookingRepository
-                    .existsByCourtIdAndBookingDateAndStartTimeAndStatus(
-                            item.getCourt().getId(),
-                            item.getBookingDate(),
-                            item.getStartTime(),
-                            BookingStatus.CONFIRMED
-                    );
+            boolean alreadyBooked = bookingRepository.existsOverlappingBooking(
+                    item.getCourt().getId(),
+                    item.getBookingDate(),
+                    item.getStartTime(),
+                    item.getEndTime(),
+                    List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED));
+
             if (alreadyBooked) {
-                // courtId, date, time are not PII — safe to log
                 String conflict = item.getCourt().getCourtName() +
                         " on " + item.getBookingDate() +
-                        " at " + item.getStartTime();
+                        " at " + item.getStartTime() +
+                        " to " + item.getEndTime();
                 log.warn("Slot conflict detected — userId: {}, slot: {}", userId, conflict);
                 conflicts.add(conflict);
             }
@@ -87,8 +89,9 @@ public class BookingServiceImpl implements BookingService {
                     .status(BookingStatus.CONFIRMED)
                     .build();
             bookingRepository.save(booking);
-            log.debug("Booking saved — courtId: {}, date: {}, time: {}",
-                    item.getCourt().getId(), item.getBookingDate(), item.getStartTime());
+            log.debug("Booking saved — courtId: {}, date: {}, startTime: {}, endTime: {}",
+                    item.getCourt().getId(), item.getBookingDate(),
+                    item.getStartTime(), item.getEndTime());
         }
 
         cartRepository.deleteByUserId(userId);
@@ -115,7 +118,6 @@ public class BookingServiceImpl implements BookingService {
     @Transactional
     public BookingDTO reschedule(Long userId, Long bookingId,
                                  RescheduleRequest request) {
-        // userId, bookingId, date and time are not PII — safe to log
         log.info("Reschedule attempt — userId: {}, bookingId: {}, newDate: {}, newTime: {}",
                 userId, bookingId, request.newDate(), request.newStartTime());
 
@@ -132,6 +134,38 @@ public class BookingServiceImpl implements BookingService {
                     "You cannot reschedule someone else's booking");
         }
 
+        // 1. End time must be after start time
+        if (!request.newEndTime().isAfter(request.newStartTime())) {
+            throw new RuntimeException("New end time must be after new start time");
+        }
+
+        // 2. Minimum 1 hour duration
+        long durationMinutes = Duration.between(
+                request.newStartTime(), request.newEndTime()).toMinutes();
+        if (durationMinutes < 30) {
+            throw new RuntimeException("Minimum booking duration is 30 Minutes");
+        }
+
+        // 3. Validate against venue operating hours
+        Venue venue = booking.getVenue();
+
+        if (request.newStartTime().isBefore(venue.getOpeningTime()) ||
+                request.newStartTime().isAfter(venue.getClosingTime().minusMinutes(60))) {
+            log.warn("Reschedule rejected — startTime outside venue hours — bookingId: {}", bookingId);
+            throw new RuntimeException(
+                    "Start time " + request.newStartTime() +
+                            " is outside venue operating hours (" +
+                            venue.getOpeningTime() + " - " + venue.getClosingTime() + ")");
+        }
+
+        if (request.newEndTime().isAfter(venue.getClosingTime())) {
+            log.warn("Reschedule rejected — endTime exceeds closing — bookingId: {}", bookingId);
+            throw new RuntimeException(
+                    "End time " + request.newEndTime() +
+                            " exceeds venue closing time " + venue.getClosingTime());
+        }
+
+        // 4. 12-hour rule
         LocalDateTime originalStart = booking.getBookingDate()
                 .atTime(booking.getStartTime());
         LocalDateTime twelveHoursFromNow = LocalDateTime.now().plusHours(12);
@@ -143,30 +177,32 @@ public class BookingServiceImpl implements BookingService {
                     "Cannot reschedule. Booking starts in less than 12 hours.");
         }
 
-        boolean newSlotTaken = bookingRepository
-                .existsByCourtIdAndBookingDateAndStartTimeAndStatus(
-                        booking.getCourt().getId(),
-                        request.newDate(),
-                        request.newStartTime(),
-                        BookingStatus.CONFIRMED
-                );
+        // 5. Overlap check for new slot
+        boolean newSlotTaken = bookingRepository.existsOverlappingBooking(
+                booking.getCourt().getId(),
+                request.newDate(),
+                request.newStartTime(),
+                request.newEndTime(),
+                List.of(BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED));
 
         if (newSlotTaken) {
-            log.warn("Reschedule rejected — new slot taken — courtId: {}, date: {}, time: {}",
-                    booking.getCourt().getId(), request.newDate(), request.newStartTime());
+            log.warn("Reschedule rejected — new slot overlaps existing booking — courtId: {}",
+                    booking.getCourt().getId());
             throw new SlotAlreadyBookedException(
-                    "The new slot is already booked. Please choose another time.");
+                    "The new slot overlaps an existing booking. Please choose another time.");
         }
 
+        // 6. Save rescheduled booking
         booking.setBookingDate(request.newDate());
         booking.setStartTime(request.newStartTime());
-        booking.setEndTime(request.newStartTime().plusHours(1));
+        booking.setEndTime(request.newEndTime());
         booking.setStatus(BookingStatus.RESCHEDULED);
 
         Booking updated = bookingRepository.save(booking);
 
-        log.info("Booking rescheduled — userId: {}, bookingId: {}, newDate: {}, newTime: {}",
-                userId, bookingId, request.newDate(), request.newStartTime());
+        log.info("Booking rescheduled — userId: {}, bookingId: {}, newDate: {}, newStartTime: {}, newEndTime: {}",
+                userId, bookingId, request.newDate(),
+                request.newStartTime(), request.newEndTime());
 
         return toDTO(updated);
     }

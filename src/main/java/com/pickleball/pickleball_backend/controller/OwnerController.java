@@ -3,40 +3,40 @@ package com.pickleball.pickleball_backend.controller;
 import com.pickleball.pickleball_backend.dto.request.CreateVenueRequest;
 import com.pickleball.pickleball_backend.dto.response.BookingDTO;
 import com.pickleball.pickleball_backend.dto.response.VenueDetailDTO;
-import com.pickleball.pickleball_backend.entity.Venue;
-import com.pickleball.pickleball_backend.entity.VenuePhoto;
-import com.pickleball.pickleball_backend.repository.VenuePhotoRepository;
-import com.pickleball.pickleball_backend.repository.VenueRepository;
+import com.pickleball.pickleball_backend.service.VenuePhotoService;
 import com.pickleball.pickleball_backend.service.VenueService;
 import com.pickleball.pickleball_backend.util.SecurityUtils;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.nio.file.*;
 import java.time.LocalDate;
 import java.util.List;
-import java.util.UUID;
-
 @RestController
 @RequestMapping("/api/owner")
 @RequiredArgsConstructor
+@Validated
 @Tag(name = "Owner — Venue Management", description = "Court Owner endpoints — requires OWNER role")
 @SecurityRequirement(name = "Bearer Authentication")
 public class OwnerController {
 
     private final VenueService venueService;
     private final SecurityUtils securityUtils;
-    private final VenuePhotoRepository venuePhotoRepository;
-    private final VenueRepository venueRepository;
+    private final VenuePhotoService venuePhotoService;
 
     @Operation(
             summary = "Get my venues",
@@ -83,7 +83,9 @@ public class OwnerController {
     @PreAuthorize("hasRole('OWNER')")
     @GetMapping("/venues/{venueId}/bookings")
     public ResponseEntity<List<BookingDTO>> getVenueBookings(
-            @PathVariable Long venueId,
+            @PathVariable
+            @Min(value = 1, message = "Venue ID must be a positive number")
+            Long venueId,
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
             LocalDate date) {
@@ -92,41 +94,50 @@ public class OwnerController {
                 venueService.getVenueBookings(ownerId, venueId, date));
     }
 
+
+
     @Operation(
             summary = "Upload venue photos",
-            description = "Upload up to 5 photos for a venue. " +
-                    "Supported formats: JPG, PNG."
+            description = "Upload up to 5 photos for a venue. Supported formats: JPG, PNG."
+    )
+    @io.swagger.v3.oas.annotations.parameters.RequestBody(
+            content = @Content(
+                    mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
+                    schema = @Schema(implementation = PhotoUploadRequest.class)
+            )
     )
     @PreAuthorize("hasRole('OWNER')")
-    @PostMapping("/venues/{venueId}/photos")
+    @PostMapping(value = "/venues/{venueId}/photos", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Void> uploadPhotos(
             @PathVariable Long venueId,
-            @RequestParam("files") List<MultipartFile> files) throws IOException {
-
-        if (files.size() > 5) {
-            throw new RuntimeException("Maximum 5 photos allowed");
-        }
-
-        Venue venue = venueRepository.findById(venueId)
-                .orElseThrow(() -> new RuntimeException("Venue not found"));
-
-        String uploadDir = "uploads/venues/" + venueId + "/";
-        Files.createDirectories(Paths.get(uploadDir));
-
-        for (MultipartFile file : files) {
-            String filename = UUID.randomUUID() + "_" +
-                    file.getOriginalFilename();
-            Path filePath = Paths.get(uploadDir + filename);
-            Files.write(filePath, file.getBytes());
-
-            VenuePhoto photo = VenuePhoto.builder()
-                    .venue(venue)
-                    .photoUrl("/uploads/venues/" + venueId + "/" + filename)
-                    .displayOrder(0)
-                    .build();
-            venuePhotoRepository.save(photo);
-        }
-
+            @RequestPart("files") List<MultipartFile> files) throws IOException {
+        venuePhotoService.uploadPhotos(venueId, files);   // ← single line call
         return ResponseEntity.ok().build();
+    }
+
+
+
+    @Operation(
+            summary = "Delete a venue photo",
+            description = "Delete a specific photo by ID. Only the venue owner can delete photos."
+    )
+    @PreAuthorize("hasRole('OWNER')")
+    @DeleteMapping("/venues/{venueId}/photos/{photoId}")
+    public ResponseEntity<Void> deletePhoto(
+            @PathVariable
+            @Min(value = 1, message = "Venue ID must be a positive number")
+            Long venueId,
+            @PathVariable
+            @Min(value = 1, message = "Photo ID must be a positive number")
+            Long photoId) {
+        Long ownerId = securityUtils.getCurrentUserId();
+        venuePhotoService.deletePhoto(venueId, photoId, ownerId);
+        return ResponseEntity.noContent().build();
+    }
+
+    static class PhotoUploadRequest {
+        @Schema(type = "array", description = "JPG or PNG files — max 5")
+        @ArraySchema(schema = @Schema(type = "string", format = "binary"))
+        public List<MultipartFile> files;
     }
 }
