@@ -1,10 +1,11 @@
+# ── Java / Maven ──
 HELP.md
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-### STS ###
+# ── Spring / IDE ──
 .apt_generated
 .classpath
 .factorypath
@@ -12,37 +13,33 @@ target/
 .settings
 .springBeans
 .sts4-cache
-
-### IntelliJ IDEA ###
 .idea
 *.iws
 *.iml
 *.ipr
-
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
+.vscode/
 build/
 !**/src/main/**/build/
 !**/src/test/**/build/
 
-### VS Code ###
-.vscode/
-
-
-# Environment variables — never commit sensitive data
+# ── Sensitive files ── NEVER commit these ──
 .env
 *.env
-
-# Application properties with real credentials
 src/main/resources/application.properties
 
-# Log files — never commit logs
+# ── Logs ──
 logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Upload folder — never commit user uploaded files
+# ── Node / Frontend ──
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ── Uploads ──
 uploads/
