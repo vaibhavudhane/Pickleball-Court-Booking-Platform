@@ -17,6 +17,15 @@ spring.jpa.open-in-view=false
 jwt.secret=${JWT_SECRET:your_secret_key_minimum_32_characters_here}
 jwt.expiration=86400000
 
+# Azure Blob Storage (for venue photos)
+# On Azure App Service, set AZURE_STORAGE_CONNECTION_STRING as an environment variable
+azure.storage.connection-string=${AZURE_STORAGE_CONNECTION_STRING:UseDevelopmentStorage=true}
+azure.storage.container-name=${AZURE_STORAGE_CONTAINER_NAME:venue-photos}
+
+# CORS — comma-separated list of allowed frontend origins
+# On Azure: set CORS_ALLOWED_ORIGINS as an App Service environment variable
+cors.allowed-origins=${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5174}
+
 # Server
 server.port=8080
 
