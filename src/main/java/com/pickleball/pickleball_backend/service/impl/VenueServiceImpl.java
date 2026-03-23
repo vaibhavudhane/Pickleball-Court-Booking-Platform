@@ -147,6 +147,16 @@ public class VenueServiceImpl implements VenueService {
             }
             venue.setNumCourts(requestedCourts);
         } else if (requestedCourts < currentCourts) {
+            List<Court> allCourts = new ArrayList<>(venue.getCourts());
+            allCourts.sort((a, b) -> b.getCourtNumber() - a.getCourtNumber());
+            int toRemove = currentCourts - requestedCourts;
+            for (int i = 0; i < toRemove; i++) {
+                Court court = allCourts.get(i);
+                venue.getCourts().remove(court);
+                courtRepository.delete(court);
+                log.debug("Court removed during update — venueId: {}, courtNumber: {}",
+                        venueId, court.getCourtNumber());
+            }
             venue.setNumCourts(requestedCourts);
             log.info("numCourts reduced — venueId: {}, from: {}, to: {}",
                     venueId, currentCourts, requestedCourts);
@@ -171,10 +181,6 @@ public class VenueServiceImpl implements VenueService {
     public List<VenueDetailDTO> getMyVenues(Long ownerId) {
         log.debug("Fetching owner venues — ownerId: {}", ownerId);
         List<Venue> venues = venueRepository.findByOwnerId(ownerId);
-        if (venues.isEmpty()) {
-            log.info("No venues found — ownerId: {}", ownerId);
-            throw new ResourceNotFoundException("No venues found for this owner");
-        }
         log.debug("Found {} venues — ownerId: {}", venues.size(), ownerId);
         return venues.stream().map(this::toDetailDTO).toList();
     }
