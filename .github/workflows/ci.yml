@@ -1,4 +1,4 @@
-name: Backend CI
+name: CI — Backend + Frontend
 
 on:
   push:
@@ -7,7 +7,8 @@ on:
     branches: [ "dev", "main" ]
 
 jobs:
-  build-and-test:
+  backend-ci:
+    name: Backend Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -52,4 +53,36 @@ jobs:
         with:
           name: pickleball-backend-jar
           path: target/*.jar
+          retention-days: 5
+
+  frontend-ci:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Create .env for CI
+        run: |
+          echo "VITE_API_URL=http://localhost:8080" > .env
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pickleball-frontend-dist
+          path: dist/
           retention-days: 5
