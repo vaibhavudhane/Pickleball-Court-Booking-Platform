@@ -2,6 +2,7 @@ package com.pickleball.pickleball_backend.config;
 
 import com.pickleball.pickleball_backend.util.JwtFilter;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.*;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.*;
@@ -62,13 +63,16 @@ public class SecurityConfig {
         return config.getAuthenticationManager();
     }
 
-    // Allow React (localhost:3000) to call this backend (localhost:8080)
+    @Value("${cors.allowed-origins:http://localhost:3000,http://localhost:5174}")
+    private String allowedOriginsRaw;
+
+    // Allow React frontend to call this backend.
+    // Set CORS_ALLOWED_ORIGINS env var on Azure to your Static Web App URL.
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
+        List<String> origins = List.of(allowedOriginsRaw.split(","));
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of("http://localhost:3000",
-                "http://localhost:5174",
-                "https://AZURE_STATIC_APP_URL.azurestaticapps.net"));
+        config.setAllowedOrigins(origins);
         config.setAllowedMethods(List.of("GET","POST","PUT","DELETE","OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);
