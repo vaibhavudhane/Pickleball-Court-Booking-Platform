@@ -45,7 +45,34 @@ export default function VenueDetailPage() {
   const [adding, setAdding] = useState(false);
   const [cartMsg, setCartMsg] = useState("");
   const [cartCount, setCartCount] = useState(0);
+  const [lightbox, setLightbox] = useState(null); // null | { url, index }
   const gridRef = useRef(null);
+
+  // Keyboard navigation for lightbox
+  useEffect(() => {
+    if (!lightbox) return;
+    const handler = (e) => {
+      if (e.key === "Escape") setLightbox(null);
+      if (e.key === "ArrowRight") {
+        const next = (lightbox.index + 1) % venue.photoUrls.length;
+        setLightbox({
+          url: `${import.meta.env.VITE_API_URL}${venue.photoUrls[next]}`,
+          index: next,
+        });
+      }
+      if (e.key === "ArrowLeft") {
+        const prev =
+          (lightbox.index - 1 + venue.photoUrls.length) %
+          venue.photoUrls.length;
+        setLightbox({
+          url: `${import.meta.env.VITE_API_URL}${venue.photoUrls[prev]}`,
+          index: prev,
+        });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [lightbox, venue]);
 
   const dateStr = selDate
     ? `${selDate.getFullYear()}-${String(selDate.getMonth() + 1).padStart(2, "0")}-${String(selDate.getDate()).padStart(2, "0")}`
@@ -462,13 +489,91 @@ export default function VenueDetailPage() {
             {venue.photoUrls?.length > 0 && (
               <div className="flex gap-2 mt-4 overflow-x-auto pb-1">
                 {venue.photoUrls.map((url, i) => (
-                  <img
+                  <div
                     key={i}
-                    src={`${import.meta.env.VITE_API_URL}${url}`}
-                    alt=""
-                    className="h-20 w-32 object-cover rounded-xl flex-shrink-0 border border-gray-100 dark:border-gray-800"
-                  />
+                    className="relative flex-shrink-0 group cursor-zoom-in"
+                    onClick={() =>
+                      setLightbox({
+                        url: `${import.meta.env.VITE_API_URL}${url}`,
+                        index: i,
+                      })
+                    }
+                  >
+                    <img
+                      src={`${import.meta.env.VITE_API_URL}${url}`}
+                      alt={`Venue photo ${i + 1}`}
+                      className="h-24 w-36 object-cover rounded-xl border border-gray-100 dark:border-gray-800 transition-all duration-200 group-hover:brightness-75 group-hover:scale-[1.03] group-hover:shadow-lg"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                      <span className="text-white text-xl">🔍</span>
+                    </div>
+                    <div className="absolute bottom-1 right-1 bg-black/50 text-white text-xs px-1.5 py-0.5 rounded-md font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                      {i + 1}/{venue.photoUrls.length}
+                    </div>
+                  </div>
                 ))}
+              </div>
+            )}
+
+            {/* ── Lightbox Modal ── */}
+            {lightbox && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm"
+                onClick={() => setLightbox(null)}
+              >
+                <div
+                  className="relative max-w-4xl max-h-[90vh] mx-4"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <img
+                    src={lightbox.url}
+                    alt="Venue photo preview"
+                    className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl"
+                  />
+                  {/* Close button */}
+                  <button
+                    onClick={() => setLightbox(null)}
+                    className="absolute -top-4 -right-4 w-9 h-9 bg-white text-gray-800 rounded-full flex items-center justify-center text-lg font-black shadow-lg hover:bg-gray-100 transition-colors"
+                  >
+                    ×
+                  </button>
+                  {/* Prev / Next arrows */}
+                  {venue.photoUrls.length > 1 && (
+                    <>
+                      <button
+                        onClick={() => {
+                          const prev =
+                            (lightbox.index - 1 + venue.photoUrls.length) %
+                            venue.photoUrls.length;
+                          setLightbox({
+                            url: `${import.meta.env.VITE_API_URL}${venue.photoUrls[prev]}`,
+                            index: prev,
+                          });
+                        }}
+                        className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 hover:bg-white text-gray-800 rounded-full flex items-center justify-center text-xl font-black shadow-lg transition-colors"
+                      >
+                        ‹
+                      </button>
+                      <button
+                        onClick={() => {
+                          const next =
+                            (lightbox.index + 1) % venue.photoUrls.length;
+                          setLightbox({
+                            url: `${import.meta.env.VITE_API_URL}${venue.photoUrls[next]}`,
+                            index: next,
+                          });
+                        }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 hover:bg-white text-gray-800 rounded-full flex items-center justify-center text-xl font-black shadow-lg transition-colors"
+                      >
+                        ›
+                      </button>
+                    </>
+                  )}
+                  {/* Photo counter */}
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs font-semibold px-3 py-1 rounded-full">
+                    {lightbox.index + 1} / {venue.photoUrls.length}
+                  </div>
+                </div>
               </div>
             )}
           </div>
