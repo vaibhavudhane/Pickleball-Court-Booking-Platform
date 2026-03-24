@@ -78,13 +78,12 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
             }
 
             // Validate MIME type (catches renamed files)
-            if (contentType == null ||
-                    (!contentType.equals("image/jpeg") &&
-                            !contentType.equals("image/png"))) {
+            String ct = contentType.toLowerCase();
+            if (!ct.equals("image/jpeg") && !ct.equals("image/jpg") &&
+                    !ct.equals("image/png") && !ct.equals("image/pjpeg")) {
                 throw new RuntimeException(
-                        "Invalid file content: '" + originalFilename + "' — file must be a real JPG or PNG image");
+                        "Invalid file: '" + originalFilename + "' — only JPG and PNG allowed");
             }
-
             // Save to disk
             String filename = UUID.randomUUID() + "_" + originalFilename;
             Path filePath = Paths.get(uploadDir + filename);
