@@ -1,21 +1,18 @@
 package com.pickleball.pickleball_backend.service.impl;
 
-import com.azure.storage.blob.BlobContainerClient;
-import com.azure.storage.blob.BlobContainerClientBuilder;
 import com.pickleball.pickleball_backend.entity.Venue;
 import com.pickleball.pickleball_backend.entity.VenuePhoto;
 import com.pickleball.pickleball_backend.repository.VenuePhotoRepository;
 import com.pickleball.pickleball_backend.repository.VenueRepository;
 import com.pickleball.pickleball_backend.service.VenuePhotoService;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.nio.file.*;
 import java.util.List;
 import java.util.UUID;
 
@@ -28,63 +25,47 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
     private final VenueRepository venueRepository;
     private final VenuePhotoRepository venuePhotoRepository;
 
-    // Defaults to "none" locally — Azure sets the real value via env var
-    @Value("${azure.storage.connection-string:none}")
-    private String connectionString;
-
-    @Value("${azure.storage.container-name:venue-photos}")
-    private String containerName;
-
-    private BlobContainerClient containerClient;
-
-    @PostConstruct
-    public void init() {
-        if ("none".equals(connectionString)) {
-            log.warn("Azure Blob Storage not configured — photo upload/delete will be unavailable. " +
-                    "Set azure.storage.connection-string in application.properties to enable.");
-            return;
-        }
-        containerClient = new BlobContainerClientBuilder()
-                .connectionString(connectionString)
-                .containerName(containerName)
-                .buildClient();
-        containerClient.createIfNotExists();
-        log.info("Azure Blob container ready — container: {}", containerName);
-    }
-
     @Override
     public void uploadPhotos(Long venueId, List<MultipartFile> files) throws IOException {
 
-        if (containerClient == null) {
-            throw new RuntimeException(
-                    "Photo upload is not available — Azure Blob Storage is not configured.");
-        }
-
+        // 1. Validate venue exists
         Venue venue = venueRepository.findById(venueId)
                 .orElseThrow(() -> {
                     log.warn("Photo upload failed — venueId not found: {}", venueId);
                     return new RuntimeException("Venue not found: " + venueId);
                 });
 
+        // 2. ← Check incoming count FIRST before DB lookup
         if (files.size() > 5) {
-            throw new RuntimeException("Cannot upload more than 5 photos at once");
+            throw new RuntimeException(
+                    "Cannot upload more than 5 photos at once");
         }
 
+        // 2. Check existing photo count
         int existingCount = venuePhotoRepository.countByVenueId(venueId);
+        int incomingCount = files.size();
+
+        log.debug("Photo upload — venueId: {}, existing: {}, incoming: {}",
+                venueId, existingCount, incomingCount);
 
         if (existingCount >= 5) {
             throw new RuntimeException(
                     "This venue already has 5 photos — delete some before uploading more");
         }
 
-        if (existingCount + files.size() > 5) {
+        if (existingCount + incomingCount > 5) {
             throw new RuntimeException(
-                    "Cannot upload " + files.size() + " photos — venue already has "
+                    "Cannot upload " + incomingCount + " photos — venue already has "
                             + existingCount + " photos. Maximum allowed is 5 total");
         }
 
+        // 3. Validate and save each file
+        String uploadDir = "uploads/venues/" + venueId + "/";
+        Files.createDirectories(Paths.get(uploadDir));
+
         for (MultipartFile file : files) {
 
+            // Validate extension
             String originalFilename = file.getOriginalFilename();
             String contentType = file.getContentType();
 
@@ -96,6 +77,7 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
                         "Invalid file type: '" + originalFilename + "' — only JPG and PNG are allowed");
             }
 
+            // Validate MIME type (catches renamed files)
             if (contentType == null ||
                     (!contentType.equals("image/jpeg") &&
                             !contentType.equals("image/png"))) {
@@ -103,29 +85,29 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
                         "Invalid file content: '" + originalFilename + "' — file must be a real JPG or PNG image");
             }
 
-            String blobName = "venues/" + venueId + "/" + UUID.randomUUID() + "_" + originalFilename;
+            // Save to disk
+            String filename = UUID.randomUUID() + "_" + originalFilename;
+            Path filePath = Paths.get(uploadDir + filename);
+            Files.write(filePath, file.getBytes());
 
-            containerClient.getBlobClient(blobName)
-                    .upload(file.getInputStream(), file.getSize(), true);
-
-            String photoUrl = containerClient.getBlobClient(blobName).getBlobUrl();
-
+            // Save to DB
             VenuePhoto photo = VenuePhoto.builder()
                     .venue(venue)
-                    .photoUrl(photoUrl)
+                    .photoUrl("/uploads/venues/" + venueId + "/" + filename)
                     .displayOrder(0)
                     .build();
             venuePhotoRepository.save(photo);
 
-            log.debug("Photo uploaded to Azure Blob — venueId: {}, blob: {}", venueId, blobName);
+            log.debug("Photo saved — venueId: {}, filename: {}", venueId, filename);
         }
 
-        log.info("Photos uploaded successfully — venueId: {}, count: {}", venueId, files.size());
+        log.info("Photos uploaded successfully — venueId: {}, count: {}", venueId, incomingCount);
     }
 
     @Override
     public void deletePhoto(Long venueId, Long photoId, Long ownerId) {
 
+        // Verify venue exists and belongs to this owner
         Venue venue = venueRepository.findById(venueId)
                 .orElseThrow(() -> {
                     log.warn("Photo delete failed — venueId not found: {}", venueId);
@@ -138,6 +120,7 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
             throw new RuntimeException("You do not own this venue");
         }
 
+        // Verify photo exists and belongs to this venue
         VenuePhoto photo = venuePhotoRepository.findById(photoId)
                 .orElseThrow(() -> {
                     log.warn("Photo delete failed — photoId not found: {}", photoId);
@@ -145,21 +128,24 @@ public class VenuePhotoServiceImpl implements VenuePhotoService {
                 });
 
         if (!photo.getVenue().getId().equals(venueId)) {
+            log.warn("Photo delete rejected — photo does not belong to venue");
             throw new RuntimeException("Photo does not belong to this venue");
         }
 
-        if (containerClient != null) {
-            try {
-                String blobUrl = photo.getPhotoUrl();
-                String blobName = blobUrl.substring(blobUrl.indexOf("venues/"));
-                containerClient.getBlobClient(blobName).deleteIfExists();
-                log.debug("Blob deleted — blobName: {}", blobName);
-            } catch (Exception e) {
-                log.warn("Could not delete blob — continuing with DB delete: {}", e.getMessage());
-            }
+        // Delete physical file from disk
+        try {
+            String filePath = photo.getPhotoUrl()
+                    .replaceFirst("^/", ""); // remove leading slash
+            java.nio.file.Path path = java.nio.file.Paths.get(filePath);
+            java.nio.file.Files.deleteIfExists(path);
+            log.debug("Photo file deleted — path: {}", filePath);
+        } catch (Exception e) {
+            log.warn("Could not delete photo file — continuing with DB delete: {}", e.getMessage());
         }
 
+        // Delete from DB
         venuePhotoRepository.delete(photo);
         log.info("Photo deleted — photoId: {}, venueId: {}", photoId, venueId);
     }
+
 }
